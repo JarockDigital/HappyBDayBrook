@@ -18,9 +18,10 @@
   });
 
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const isMobileViewport = () => window.innerWidth < 768;
 
   /* ==========================================================================
-     1. Graceful Image Handling (Photos + Optional Venom Hero Art)
+     1. Pre-Decode Photos Immediately so Fast Mobile Scrolling Never Lags
      ========================================================================== */
   function createPlaceholderDataUri(label) {
     const safeLabel = String(label || 'ADD PHOTO').replace(/[<>&"']/g, '');
@@ -39,6 +40,14 @@
     return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
   }
 
+  function warmDecodePhotos() {
+    document.querySelectorAll('img[data-fallback-label]').forEach((img) => {
+      if (typeof img.decode === 'function') {
+        img.decode().catch(() => {});
+      }
+    });
+  }
+
   document.querySelectorAll('img[data-fallback-label]').forEach((img) => {
     img.addEventListener(
       'error',
@@ -52,6 +61,8 @@
     );
   });
 
+  warmDecodePhotos();
+
   const optionalVenomArt = document.getElementById('optional-venom-art');
   if (optionalVenomArt) {
     optionalVenomArt.addEventListener(
@@ -64,10 +75,10 @@
   }
 
   /* ==========================================================================
-     2. Branching Symbiote Tentacle & Surge Canvas Engine
+     2. Mobile-Tuned Symbiote Tentacle Canvas (Zero Scroll Resize Thrashing)
      ========================================================================== */
   const canvas = document.getElementById('symbiote-canvas');
-  const ctx = canvas ? canvas.getContext('2d') : null;
+  const ctx = canvas ? canvas.getContext('2d', { alpha: true }) : null;
 
   const symbiote = {
     retraction: 0,
@@ -78,38 +89,48 @@
     height: 0,
     time: 0,
     rafId: null,
+    isScrolling: false,
+    scrollTimer: null,
   };
 
-  const TENTACLES = [
-    { edge: 'top', pos: 0.08, angle: Math.PI * 0.42, reach: 165, width: 22, speed: 0.95, phase: 0.1, fork: true },
-    { edge: 'top', pos: 0.28, angle: Math.PI * 0.48, reach: 120, width: 15, speed: 1.15, phase: 1.3, fork: false },
-    { edge: 'top', pos: 0.72, angle: Math.PI * 0.52, reach: 128, width: 16, speed: 1.05, phase: 2.4, fork: false },
-    { edge: 'top', pos: 0.92, angle: Math.PI * 0.58, reach: 170, width: 22, speed: 0.9, phase: 3.7, fork: true },
+  const ALL_TENTACLES = [
+    { edge: 'top', pos: 0.1, angle: Math.PI * 0.42, reach: 155, width: 20, speed: 0.95, phase: 0.1, fork: true, mobile: true },
+    { edge: 'top', pos: 0.3, angle: Math.PI * 0.48, reach: 115, width: 14, speed: 1.15, phase: 1.3, fork: false, mobile: false },
+    { edge: 'top', pos: 0.7, angle: Math.PI * 0.52, reach: 120, width: 15, speed: 1.05, phase: 2.4, fork: false, mobile: false },
+    { edge: 'top', pos: 0.9, angle: Math.PI * 0.58, reach: 160, width: 20, speed: 0.9, phase: 3.7, fork: true, mobile: true },
 
-    { edge: 'left', pos: 0.22, angle: 0.12, reach: 145, width: 19, speed: 1.0, phase: 0.8, fork: true },
-    { edge: 'left', pos: 0.54, angle: -0.05, reach: 115, width: 14, speed: 1.2, phase: 2.1, fork: false },
-    { edge: 'left', pos: 0.82, angle: -0.14, reach: 150, width: 20, speed: 0.88, phase: 4.2, fork: true },
+    { edge: 'left', pos: 0.24, angle: 0.12, reach: 138, width: 18, speed: 1.0, phase: 0.8, fork: true, mobile: true },
+    { edge: 'left', pos: 0.54, angle: -0.05, reach: 110, width: 14, speed: 1.2, phase: 2.1, fork: false, mobile: false },
+    { edge: 'left', pos: 0.8, angle: -0.14, reach: 142, width: 18, speed: 0.88, phase: 4.2, fork: false, mobile: true },
 
-    { edge: 'right', pos: 0.20, angle: Math.PI - 0.12, reach: 145, width: 19, speed: 1.02, phase: 1.6, fork: true },
-    { edge: 'right', pos: 0.56, angle: Math.PI + 0.05, reach: 118, width: 14, speed: 1.18, phase: 3.1, fork: false },
-    { edge: 'right', pos: 0.84, angle: Math.PI + 0.14, reach: 155, width: 20, speed: 0.92, phase: 4.8, fork: true },
+    { edge: 'right', pos: 0.22, angle: Math.PI - 0.12, reach: 138, width: 18, speed: 1.02, phase: 1.6, fork: false, mobile: true },
+    { edge: 'right', pos: 0.56, angle: Math.PI + 0.05, reach: 112, width: 14, speed: 1.18, phase: 3.1, fork: false, mobile: false },
+    { edge: 'right', pos: 0.82, angle: Math.PI + 0.14, reach: 145, width: 18, speed: 0.92, phase: 4.8, fork: true, mobile: true },
 
-    { edge: 'bottom', pos: 0.16, angle: -Math.PI * 0.44, reach: 168, width: 21, speed: 0.94, phase: 2.7, fork: true },
-    { edge: 'bottom', pos: 0.84, angle: -Math.PI * 0.56, reach: 168, width: 21, speed: 0.96, phase: 5.1, fork: true },
+    { edge: 'bottom', pos: 0.16, angle: -Math.PI * 0.44, reach: 158, width: 20, speed: 0.94, phase: 2.7, fork: true, mobile: true },
+    { edge: 'bottom', pos: 0.84, angle: -Math.PI * 0.56, reach: 158, width: 20, speed: 0.96, phase: 5.1, fork: true, mobile: true },
   ];
 
-  function resizeCanvas() {
+  function resizeCanvas(force) {
     if (!canvas || !ctx) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    symbiote.width = window.innerWidth;
-    symbiote.height = window.innerHeight;
-    canvas.width = Math.floor(symbiote.width * dpr);
-    canvas.height = Math.floor(symbiote.height * dpr);
+    const newW = window.innerWidth;
+    const newH = window.innerHeight;
+
+    // Ignore minor mobile URL-bar height shifts during scrolling
+    if (!force && newW === symbiote.width && Math.abs(newH - symbiote.height) < 150) {
+      return;
+    }
+
+    const dpr = isMobileViewport() ? 1 : Math.min(window.devicePixelRatio || 1, 1.5);
+    symbiote.width = newW;
+    symbiote.height = newH;
+    canvas.width = Math.floor(newW * dpr);
+    canvas.height = Math.floor(newH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   function getEdgeRoot(def, w, h) {
-    const pad = 14;
+    const pad = 12;
     switch (def.edge) {
       case 'top':
         return { x: w * def.pos, y: -pad };
@@ -123,11 +144,10 @@
     }
   }
 
-  function renderStrand(startX, startY, startAngle, totalReach, baseWidth, speed, phase, t, allowFork) {
-    const segments = 16;
+  function renderStrand(startX, startY, startAngle, totalReach, baseWidth, speed, phase, t, allowFork, segments) {
     const stepLen = totalReach / segments;
-    const leftPts = [];
-    const rightPts = [];
+    const leftPts = new Array(segments + 1);
+    const rightPts = new Array(segments + 1);
 
     let x = startX;
     let y = startY;
@@ -136,18 +156,21 @@
     for (let i = 0; i <= segments; i++) {
       const p = i / segments;
       const whip =
-        Math.sin(t * speed + phase + i * 0.45) * 0.11 * p +
-        Math.cos(t * (speed * 0.7) + phase * 1.3 + i * 0.28) * 0.055;
+        Math.sin(t * speed + phase + i * 0.5) * 0.11 * p +
+        Math.cos(t * (speed * 0.7) + phase * 1.3 + i * 0.3) * 0.05;
 
       angle += whip;
 
-      const dx = symbiote.pointerX - x;
-      const dy = symbiote.pointerY - y;
-      const dist = Math.hypot(dx, dy);
-      if (dist < 190 && dist > 1) {
-        const pull = ((190 - dist) / 190) * 0.16 * p;
-        const targetAngle = Math.atan2(dy, dx);
-        angle += Math.sin(targetAngle - angle) * pull;
+      if (symbiote.pointerX > -1000) {
+        const dx = symbiote.pointerX - x;
+        const dy = symbiote.pointerY - y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < 32400 && distSq > 4) {
+          const dist = Math.sqrt(distSq);
+          const pull = ((180 - dist) / 180) * 0.15 * p;
+          const targetAngle = Math.atan2(dy, dx);
+          angle += Math.sin(targetAngle - angle) * pull;
+        }
       }
 
       if (i > 0) {
@@ -155,29 +178,30 @@
         y += Math.sin(angle) * stepLen;
       }
 
-      if (allowFork && i === 7) {
+      if (allowFork && i === Math.floor(segments * 0.45)) {
         const forkDir = phase % 2 > 1 ? 0.52 : -0.52;
         renderStrand(
           x,
           y,
           angle + forkDir,
-          totalReach * 0.52,
+          totalReach * 0.5,
           baseWidth * 0.45,
           speed * 1.25,
           phase + 1.4,
           t,
-          false
+          false,
+          Math.max(6, Math.floor(segments * 0.6))
         );
       }
 
-      const muscle = 1 + Math.sin(p * Math.PI * 2.2) * 0.15;
+      const muscle = 1 + Math.sin(p * Math.PI * 2.2) * 0.14;
       const radius = Math.max(0.7, baseWidth * Math.pow(1 - p, 1.3) * muscle);
 
       const nx = -Math.sin(angle);
       const ny = Math.cos(angle);
 
-      leftPts.push({ x: x + nx * radius, y: y + ny * radius });
-      rightPts.push({ x: x - nx * radius, y: y - ny * radius });
+      leftPts[i] = { x: x + nx * radius, y: y + ny * radius };
+      rightPts[i] = { x: x - nx * radius, y: y - ny * radius };
     }
 
     ctx.beginPath();
@@ -204,59 +228,76 @@
     ctx.fillStyle = '#07070A';
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(245, 245, 248, 0.32)';
-    ctx.lineWidth = 1.15;
+    ctx.strokeStyle = 'rgba(245, 245, 248, 0.3)';
+    ctx.lineWidth = 1.1;
     ctx.stroke();
   }
 
   function renderFrame() {
     if (!ctx) return;
-    const { width: w, height: h, retraction, surge, time } = symbiote;
-    ctx.clearRect(0, 0, w, h);
 
-    const scale = Math.min(Math.max(Math.min(w, h) / 400, 0.85), 1.45);
-    const maxDiag = Math.hypot(w, h) * 0.65;
+    // Yield main-thread headroom during active fast touch scrolling
+    if (!symbiote.isScrolling) {
+      const { width: w, height: h, retraction, surge, time } = symbiote;
+      ctx.clearRect(0, 0, w, h);
 
-    for (let i = 0; i < TENTACLES.length; i++) {
-      const def = TENTACLES[i];
-      const root = getEdgeRoot(def, w, h);
-      const baseReach = def.reach * scale * (1 - retraction * 0.56);
-      const activeReach = baseReach + surge * maxDiag;
-      const activeWidth = def.width * scale * (1 - retraction * 0.25) + surge * 26;
+      const mobile = isMobileViewport();
+      const segments = mobile ? 10 : 14;
+      const scale = Math.min(Math.max(Math.min(w, h) / 400, 0.85), 1.4);
+      const maxDiag = Math.hypot(w, h) * 0.62;
 
-      renderStrand(
-        root.x,
-        root.y,
-        def.angle,
-        activeReach,
-        activeWidth,
-        def.speed,
-        def.phase,
-        time,
-        def.fork
-      );
+      for (let i = 0; i < ALL_TENTACLES.length; i++) {
+        const def = ALL_TENTACLES[i];
+        if (mobile && !def.mobile) continue;
+
+        const root = getEdgeRoot(def, w, h);
+        const baseReach = def.reach * scale * (1 - retraction * 0.58);
+        const activeReach = baseReach + surge * maxDiag;
+        const activeWidth = def.width * scale * (1 - retraction * 0.25) + surge * 24;
+
+        renderStrand(
+          root.x,
+          root.y,
+          def.angle,
+          activeReach,
+          activeWidth,
+          def.speed,
+          def.phase,
+          time,
+          def.fork,
+          segments
+        );
+      }
+
+      symbiote.time += 0.02;
     }
 
     if (!prefersReducedMotion && !document.hidden) {
-      symbiote.time += 0.02;
       symbiote.rafId = window.requestAnimationFrame(renderFrame);
     }
   }
 
   if (canvas && ctx) {
-    resizeCanvas();
+    resizeCanvas(true);
     renderFrame();
 
-    window.addEventListener('resize', () => {
-      resizeCanvas();
-      if (prefersReducedMotion) renderFrame();
-    });
+    window.addEventListener(
+      'resize',
+      () => {
+        resizeCanvas(false);
+        if (prefersReducedMotion) renderFrame();
+      },
+      { passive: true }
+    );
 
     window.addEventListener(
-      'pointermove',
-      (e) => {
-        symbiote.pointerX = e.clientX;
-        symbiote.pointerY = e.clientY;
+      'scroll',
+      () => {
+        symbiote.isScrolling = true;
+        if (symbiote.scrollTimer) clearTimeout(symbiote.scrollTimer);
+        symbiote.scrollTimer = window.setTimeout(() => {
+          symbiote.isScrolling = false;
+        }, 90);
       },
       { passive: true }
     );
@@ -266,6 +307,17 @@
       (e) => {
         symbiote.pointerX = e.clientX;
         symbiote.pointerY = e.clientY;
+      },
+      { passive: true }
+    );
+
+    window.addEventListener(
+      'pointermove',
+      (e) => {
+        if (e.pointerType === 'mouse') {
+          symbiote.pointerX = e.clientX;
+          symbiote.pointerY = e.clientY;
+        }
       },
       { passive: true }
     );
@@ -298,7 +350,7 @@
   let audioCtx = null;
   let masterGain = null;
   let loopTimer = null;
-  let eqRafId = null;
+  let eqTimer = null;
   let isPlaying = false;
 
   const MELODY_STEPS = [
@@ -382,21 +434,26 @@
     }, 620);
   }
 
-  function animateVisualizer() {
-    if (!isPlaying) {
-      eqBars.forEach((bar) => {
-        bar.style.height = '4px';
-      });
-      return;
+  function startVisualizer() {
+    if (eqTimer) clearInterval(eqTimer);
+    eqTimer = window.setInterval(() => {
+      if (!isPlaying) return;
+      const t = performance.now() * 0.01;
+      for (let i = 0; i < eqBars.length; i++) {
+        const h = Math.max(4, Math.round(7 + Math.sin(t + i * 1.25) * 6));
+        eqBars[i].style.height = `${h}px`;
+      }
+    }, 110);
+  }
+
+  function stopVisualizer() {
+    if (eqTimer) {
+      clearInterval(eqTimer);
+      eqTimer = null;
     }
-
-    const t = performance.now() * 0.009;
-    eqBars.forEach((bar, i) => {
-      const h = Math.max(4, Math.round(7 + Math.sin(t + i * 1.25) * 6));
-      bar.style.height = `${h}px`;
+    eqBars.forEach((bar) => {
+      bar.style.height = '4px';
     });
-
-    eqRafId = window.requestAnimationFrame(animateVisualizer);
   }
 
   async function startAudio() {
@@ -405,7 +462,7 @@
 
     if (soundToggleBtn) soundToggleBtn.setAttribute('aria-pressed', 'true');
     if (soundLabel) soundLabel.textContent = 'Vibe: On';
-    animateVisualizer();
+    startVisualizer();
 
     if (customAudio) {
       try {
@@ -413,7 +470,7 @@
         await customAudio.play();
         return;
       } catch (_err) {
-        // Fall back to built-in beat if assets/juice.mp3 is missing or blocked
+        // Fall back to built-in beat if assets/juice.mp3 is missing
       }
     }
 
@@ -436,14 +493,7 @@
       loopTimer = null;
     }
 
-    if (eqRafId) {
-      cancelAnimationFrame(eqRafId);
-      eqRafId = null;
-    }
-
-    eqBars.forEach((bar) => {
-      bar.style.height = '4px';
-    });
+    stopVisualizer();
   }
 
   function toggleAudio() {
@@ -459,7 +509,7 @@
   }
 
   /* ==========================================================================
-     4. Moment 1 -> Moment 2 Symbiote Surge & Reveal (Auto-Starts Music)
+     4. Snappy Moment 1 -> Moment 2 Reveal (Zero Lag on Mobile)
      ========================================================================== */
   const openingSection = document.getElementById('opening');
   const openCardBtn = document.getElementById('open-card-btn');
@@ -477,15 +527,16 @@
     items.forEach((item) => {
       window.gsap.fromTo(
         item,
-        { opacity: 0, y: 32 },
+        { opacity: 0, y: 20 },
         {
           opacity: 1,
           y: 0,
-          duration: 0.85,
-          ease: 'power3.out',
+          duration: 0.45,
+          ease: 'power2.out',
+          force3D: true,
           scrollTrigger: {
             trigger: item,
-            start: 'top 85%',
+            start: 'top 96%',
             once: true,
           },
         }
@@ -496,10 +547,10 @@
   function openBirthdayCard() {
     if (!openingSection || !cardExperience) return;
 
-    // Auto-start Juice WRLD song on user tap gesture
+    // Start music immediately on tap & ensure images are decoded before scroll
     startAudio();
+    warmDecodePhotos();
 
-    // Ensure viewport starts at the very top when unlocked
     window.scrollTo(0, 0);
     document.body.classList.remove('is-locked');
     cardExperience.classList.add('is-visible');
@@ -522,64 +573,66 @@
     tl.to('.opening-inner', {
       opacity: 0,
       scale: 0.96,
-      duration: 0.35,
+      duration: 0.25,
       ease: 'power2.in',
+      force3D: true,
     })
       .to(
         symbiote,
         {
           surge: 1,
-          duration: 0.55,
-          ease: 'power3.in',
+          duration: 0.38,
+          ease: 'power2.in',
         },
-        0.05
+        0.04
       )
       .to(
         openingSection,
         {
           opacity: 0,
-          duration: 0.3,
+          duration: 0.22,
         },
-        0.45
+        0.3
       )
       .to(
         symbiote,
         {
           surge: 0,
           retraction: 1,
-          duration: 0.85,
-          ease: 'power4.out',
+          duration: 0.55,
+          ease: 'power3.out',
         },
-        0.6
+        0.42
       )
       .fromTo(
         '.reveal-tag',
-        { opacity: 0, y: 12 },
-        { opacity: 1, y: 0, duration: 0.55, ease: 'power3.out' },
-        0.75
+        { opacity: 0, y: 10 },
+        { opacity: 1, y: 0, duration: 0.35, ease: 'power2.out', force3D: true },
+        0.5
       )
       .fromTo(
         '.mask-text',
         { yPercent: 105 },
         {
           yPercent: 0,
-          duration: 0.8,
-          stagger: 0.1,
+          duration: 0.55,
+          stagger: 0.07,
           ease: 'power3.out',
+          force3D: true,
         },
-        0.82
+        0.55
       )
       .fromTo(
         '.spider-emblem',
-        { opacity: 0, scale: 0.85 },
-        { opacity: 1, scale: 1, duration: 0.65, ease: 'power3.out' },
-        1.15
+        { opacity: 0, scale: 0.9 },
+        { opacity: 1, scale: 1, duration: 0.45, ease: 'power2.out', force3D: true },
+        0.78
       )
       .fromTo(
         '.scroll-cue',
         { opacity: 0 },
-        { opacity: 0.85, duration: 0.5 },
-        1.35
+        { opacity: 0.85, duration: 0.35 },
+        0.9
       );
   }
 
@@ -640,7 +693,7 @@
   });
 
   /* ==========================================================================
-     6. Moment 4: Architectural Envelope Flap & Medallion Reveal
+     6. Moment 4: Fast GPU Envelope Flap & Medallion Reveal
      ========================================================================== */
   const sealBtn = document.getElementById('seal-btn');
   const envelopeChassis = document.querySelector('.envelope-chassis');
@@ -658,64 +711,71 @@
     if (!hasGsap || prefersReducedMotion) {
       sealCover.hidden = true;
       letterSheet.hidden = false;
-      letterSheet.scrollIntoView({ behavior: prefersReducedMotion ? 'auto' : 'smooth', block: 'nearest' });
       return;
     }
 
     const tl = window.gsap.timeline({
       onComplete: () => {
-        letterSheet.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        window.requestAnimationFrame(() => {
+          const rect = letterSheet.getBoundingClientRect();
+          if (rect.top > window.innerHeight * 0.45) {
+            window.scrollBy({ top: rect.top - 96, behavior: 'smooth' });
+          }
+        });
       },
     });
 
     tl.to(sealBtn, {
-      scale: 0.72,
+      scale: 0.75,
       opacity: 0,
-      duration: 0.35,
+      duration: 0.2,
       ease: 'power2.in',
+      force3D: true,
     })
       .to(
         '#seal-instruction',
         {
           opacity: 0,
-          duration: 0.25,
+          duration: 0.15,
         },
         0
       )
       .to(
         envelopeFlap,
         {
-          rotateX: 180,
-          transformPerspective: 900,
-          duration: 0.65,
+          scaleY: -0.95,
+          duration: 0.36,
           ease: 'power2.inOut',
+          force3D: true,
         },
-        0.22
+        0.12
       )
       .to(
         sealCover,
         {
           opacity: 0,
-          y: -14,
-          duration: 0.35,
+          y: -10,
+          duration: 0.22,
           ease: 'power2.in',
+          force3D: true,
           onComplete: () => {
             sealCover.hidden = true;
             letterSheet.hidden = false;
           },
         },
-        0.75
+        0.4
       )
       .fromTo(
         letterSheet,
-        { opacity: 0, y: 22 },
+        { opacity: 0, y: 14 },
         {
           opacity: 1,
           y: 0,
-          duration: 0.75,
-          ease: 'power3.out',
+          duration: 0.42,
+          ease: 'power2.out',
+          force3D: true,
         },
-        0.95
+        0.52
       );
   }
 
